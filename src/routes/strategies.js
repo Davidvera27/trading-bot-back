@@ -18,4 +18,8 @@ router.put('/:id', StrategyController.updateStrategy);
 router.put('/:id/toggle', StrategyController.toggleStrategy);
 router.delete('/:id', StrategyController.deleteStrategy);
 
+// Nuevas rutas para ejecución de estrategias
+router.post('/:id/execute', StrategyController.executeStrategy);
+router.post('/:id/backtest', StrategyController.backtestStrategy);
+
 module.exports = router;

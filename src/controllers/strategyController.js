@@ -1,4 +1,6 @@
 const { Strategy, User } = require('../models');
+const tradingStrategyService = require('../services/tradingStrategyService');
+const binanceService = require('../services/binanceService');
 
 /**
  * @swagger
@@ -887,6 +889,366 @@ class StrategyController {
         success: false,
         message: 'Error interno del servidor'
       });
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/strategies/{id}/execute:
+   *   post:
+   *     summary: Ejecutar estrategia en tiempo real
+   *     tags: [Strategies]
+   *     security:
+   *       - bearerAuth: []
+   *     parameters:
+   *       - in: path
+   *         name: id
+   *         required: true
+   *         schema:
+   *           type: integer
+   *         description: ID de la estrategia
+   *     requestBody:
+   *       required: false
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             properties:
+   *               symbol:
+   *                 type: string
+   *                 description: Símbolo a analizar
+   *               interval:
+   *                 type: string
+   *                 description: Intervalo de tiempo
+   *               limit:
+   *                 type: integer
+   *                 description: Número de datos históricos
+   *     responses:
+   *       200:
+   *         description: Resultado de la ejecución de la estrategia
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 success:
+   *                   type: boolean
+   *                 result:
+   *                   type: object
+   *                   properties:
+   *                     signal:
+   *                       type: string
+   *                     reason:
+   *                       type: string
+   *                     currentPrice:
+   *                       type: number
+   *                     indicators:
+   *                       type: object
+   *                     riskManagement:
+   *                       type: object
+   *       401:
+   *         description: No autorizado
+   *       403:
+   *         description: Acceso denegado
+   *       404:
+   *         description: Estrategia no encontrada
+   *       500:
+   *         description: Error interno del servidor
+   */
+  static async executeStrategy(req, res) {
+    try {
+      const { id } = req.params;
+      const { symbol = 'BTCUSDT', interval = '1h', limit = 100 } = req.body;
+
+      // Verificar que la estrategia existe y pertenece al usuario
+      const strategy = await Strategy.findOne({
+        where: { id, user_id: req.user.userId }
+      });
+
+      if (!strategy) {
+        return res.status(404).json({
+          success: false,
+          message: 'Estrategia no encontrada'
+        });
+      }
+
+      // Verificar que la estrategia esté activa
+      if (!strategy.isActive) {
+        return res.status(400).json({
+          success: false,
+          message: 'La estrategia debe estar activa para ejecutarse'
+        });
+      }
+
+      // Obtener datos históricos de Binance
+      const klines = await binanceService.getKlines(symbol, interval, limit);
+      
+      // Convertir datos al formato requerido
+      const marketData = klines.map(kline => ({
+        openTime: kline.openTime,
+        open: kline.open,
+        high: kline.high,
+        low: kline.low,
+        close: kline.close,
+        volume: kline.volume,
+        closeTime: kline.closeTime
+      }));
+
+      // Ejecutar estrategia
+      const result = await tradingStrategyService.executeStrategy(
+        strategy.type,
+        symbol,
+        marketData,
+        strategy.parameters || {}
+      );
+
+      // Guardar resultado en la base de datos
+      await strategy.update({
+        lastExecuted: new Date(),
+        lastSignal: result.signal,
+        lastPrice: result.currentPrice
+      });
+
+      res.json({
+        success: true,
+        result: {
+          ...result,
+          strategy: {
+            id: strategy.id,
+            name: strategy.name,
+            type: strategy.type
+          },
+          executionTime: new Date()
+        }
+      });
+    } catch (error) {
+      console.error('Error al ejecutar estrategia:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error interno del servidor',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   * @swagger
+   * /api/strategies/{id}/backtest:
+   *   post:
+   *     summary: Ejecutar backtest de la estrategia
+   *     tags: [Strategies]
+   *     security:
+   *       - bearerAuth: []
+   *     parameters:
+   *       - in: path
+   *         name: id
+   *         required: true
+   *         schema:
+   *           type: integer
+   *         description: ID de la estrategia
+   *     requestBody:
+   *       required: false
+   *       content:
+   *         application/json:
+   *           schema:
+   *             type: object
+   *             properties:
+   *               symbol:
+   *                 type: string
+   *                 description: Símbolo a analizar
+   *               interval:
+   *                 type: string
+   *                 description: Intervalo de tiempo
+   *               startDate:
+   *                 type: string
+   *                 format: date
+   *                 description: Fecha de inicio
+   *               endDate:
+   *                 type: string
+   *                 format: date
+   *                 description: Fecha de fin
+   *     responses:
+   *       200:
+   *         description: Resultado del backtest
+   *         content:
+   *           application/json:
+   *             schema:
+   *               type: object
+   *               properties:
+   *                 success:
+   *                   type: boolean
+   *                 backtest:
+   *                   type: object
+   *                   properties:
+   *                     totalTrades:
+   *                       type: integer
+   *                     winningTrades:
+   *                       type: integer
+   *                     losingTrades:
+   *                       type: integer
+   *                     winRate:
+   *                       type: number
+   *                     totalReturn:
+   *                       type: number
+   *                     maxDrawdown:
+   *                       type: number
+   *                     sharpeRatio:
+   *                       type: number
+   *       401:
+   *         description: No autorizado
+   *       403:
+   *         description: Acceso denegado
+   *       404:
+   *         description: Estrategia no encontrada
+   *       500:
+   *         description: Error interno del servidor
+   */
+  static async backtestStrategy(req, res) {
+    try {
+      const { id } = req.params;
+      const { 
+        symbol = 'BTCUSDT', 
+        interval = '1h', 
+        startDate = null, 
+        endDate = null 
+      } = req.body;
+
+      // Verificar que la estrategia existe y pertenece al usuario
+      const strategy = await Strategy.findOne({
+        where: { id, user_id: req.user.userId }
+      });
+
+      if (!strategy) {
+        return res.status(404).json({
+          success: false,
+          message: 'Estrategia no encontrada'
+        });
+      }
+
+      // Calcular fechas por defecto (últimos 30 días)
+      const end = endDate ? new Date(endDate) : new Date();
+      const start = startDate ? new Date(startDate) : new Date(end.getTime() - (30 * 24 * 60 * 60 * 1000));
+
+      // Obtener datos históricos
+      const klines = await binanceService.getKlines(
+        symbol, 
+        interval, 
+        1000, 
+        start.getTime(), 
+        end.getTime()
+      );
+
+      // Convertir datos
+      const marketData = klines.map(kline => ({
+        openTime: kline.openTime,
+        open: kline.open,
+        high: kline.high,
+        low: kline.low,
+        close: kline.close,
+        volume: kline.volume,
+        closeTime: kline.closeTime
+      }));
+
+      // Ejecutar backtest
+      const backtestResult = await this.runBacktest(strategy, marketData);
+
+      res.json({
+        success: true,
+        backtest: backtestResult
+      });
+    } catch (error) {
+      console.error('Error al ejecutar backtest:', error);
+      res.status(500).json({
+        success: false,
+        message: 'Error interno del servidor',
+        error: error.message
+      });
+    }
+  }
+
+  /**
+   * Ejecutar backtest de una estrategia
+   */
+  static async runBacktest(strategy, marketData) {
+    try {
+      let balance = 10000; // Capital inicial
+      let position = null;
+      const trades = [];
+      let maxBalance = balance;
+      let maxDrawdown = 0;
+
+      for (let i = 50; i < marketData.length; i++) { // Empezar después de tener suficientes datos
+        const currentData = marketData.slice(0, i + 1);
+        const currentPrice = currentData[currentData.length - 1].close;
+
+        // Ejecutar estrategia
+        const result = await tradingStrategyService.executeStrategy(
+          strategy.type,
+          'SYMBOL',
+          currentData,
+          strategy.parameters || {}
+        );
+
+        // Procesar señales
+        if (result.signal === 'BUY' && !position) {
+          position = {
+            entryPrice: currentPrice,
+            entryTime: currentData[currentData.length - 1].openTime,
+            size: balance * 0.95 / currentPrice // Usar 95% del balance
+          };
+        } else if (result.signal === 'SELL' && position) {
+          const exitPrice = currentPrice;
+          const profit = (exitPrice - position.entryPrice) * position.size;
+          balance += profit;
+
+          trades.push({
+            entryPrice: position.entryPrice,
+            exitPrice,
+            profit,
+            entryTime: position.entryTime,
+            exitTime: currentData[currentData.length - 1].openTime
+          });
+
+          position = null;
+        }
+
+        // Actualizar métricas
+        if (balance > maxBalance) {
+          maxBalance = balance;
+        }
+
+        const drawdown = (maxBalance - balance) / maxBalance;
+        if (drawdown > maxDrawdown) {
+          maxDrawdown = drawdown;
+        }
+      }
+
+      // Calcular estadísticas
+      const winningTrades = trades.filter(t => t.profit > 0);
+      const losingTrades = trades.filter(t => t.profit < 0);
+      const winRate = trades.length > 0 ? winningTrades.length / trades.length : 0;
+      const totalReturn = (balance - 10000) / 10000;
+
+      // Calcular Sharpe Ratio (simplificado)
+      const returns = trades.map(t => t.profit / 10000);
+      const avgReturn = returns.length > 0 ? returns.reduce((sum, r) => sum + r, 0) / returns.length : 0;
+      const variance = returns.length > 0 ? returns.reduce((sum, r) => sum + Math.pow(r - avgReturn, 2), 0) / returns.length : 0;
+      const sharpeRatio = variance > 0 ? avgReturn / Math.sqrt(variance) : 0;
+
+      return {
+        totalTrades: trades.length,
+        winningTrades: winningTrades.length,
+        losingTrades: losingTrades.length,
+        winRate: winRate * 100,
+        totalReturn: totalReturn * 100,
+        maxDrawdown: maxDrawdown * 100,
+        sharpeRatio,
+        finalBalance: balance,
+        trades: trades.slice(-10) // Últimas 10 operaciones
+      };
+    } catch (error) {
+      console.error('Error en backtest:', error);
+      throw error;
     }
   }
 }
